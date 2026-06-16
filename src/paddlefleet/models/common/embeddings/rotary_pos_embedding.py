@@ -77,14 +77,20 @@ class RotaryEmbedding(nn.Layer):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        self.inv_freq = 1.0 / (
-            rotary_base
-            ** (
-                paddle.arange(0, dim, 2, dtype=paddle.int64).astype(
-                    dtype=paddle.float32
-                )
-                / dim
-            )
+        # 精度对齐：强制在 CPU 上计算 inv_freq，再迁回 GPU。
+        # torch / paddle 在 fp32 GPU pow 上各差 1-2 ULP（PTX __powf 近似 vs
+        # 高精度 fp32），CPU 路径在两侧位级一致（fp64 计算后 cast）。
+        # MG 侧 ms-swift get_rope_inv_freq 已经走 CPU，这里跟它对齐避免
+        # rotary_pos_emb_output md5 在精度对齐脚本里跨框架不一致。
+        _exp_cpu = (
+            paddle.arange(0, dim, 2, dtype=paddle.int64).cpu().astype(paddle.float32)
+            / dim
+        )
+        _inv_freq_cpu = 1.0 / (rotary_base ** _exp_cpu)
+        self.inv_freq = (
+            _inv_freq_cpu.cuda()
+            if paddle.is_compiled_with_cuda()
+            else _inv_freq_cpu
         )
 
         if rope_scaling:
